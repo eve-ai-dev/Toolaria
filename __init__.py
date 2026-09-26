@@ -161,6 +161,15 @@ def _merge_cfg(user_cfg: dict) -> dict:
     rather than silently disabling rescue later."""
     defaults = _load_defaults()
     defaults.update(user_cfg)
+    store_path = defaults.get("store_path", "~/.hermes/toolaria")
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home and isinstance(store_path, str):
+        if store_path == "~/.hermes":
+            defaults["store_path"] = hermes_home
+        elif store_path.startswith("~/.hermes/"):
+            defaults["store_path"] = str(
+                Path(hermes_home) / store_path.removeprefix("~/.hermes/")
+            )
     for _k, _v in _PHASE1_DEFAULTS.items():
         defaults.setdefault(_k, _v)
     for _k, _v in _PHASE2_DEFAULTS.items():

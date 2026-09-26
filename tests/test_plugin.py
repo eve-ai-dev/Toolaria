@@ -5,6 +5,26 @@ from pathlib import Path
 import pytest
 
 
+def test_default_store_path_follows_hermes_home(toolaria, tmp_path, monkeypatch):
+    """Stage-2 discovery runs as root, so legacy ~/.hermes must use HERMES_HOME."""
+    hermes_home = tmp_path / "mounted-hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    cfg = toolaria._merge_cfg({})
+
+    assert cfg["store_path"] == str(hermes_home / "toolaria")
+
+
+def test_explicit_store_path_is_unchanged(toolaria, tmp_path, monkeypatch):
+    """Operator-selected paths remain authoritative."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "mounted-hermes-home"))
+    explicit = str(tmp_path / "operator-store")
+
+    cfg = toolaria._merge_cfg({"store_path": explicit})
+
+    assert cfg["store_path"] == explicit
+
+
 # ═══ Rescue path ═══
 
 

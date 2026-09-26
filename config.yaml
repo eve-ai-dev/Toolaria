@@ -24,6 +24,7 @@ toolaria:
   hot_ttl_hours: 168               # TTL for hot blobs (7 days)
   fetch_decay_half_life_hours: 24  # half-life for recency weighting
   max_store_mb: 500
+  # Legacy spelling follows HERMES_HOME when the host defines it.
   store_path: ~/.hermes/toolaria
   exclude_tools: []
   refuse_full_fetch: true         # refuse full mode over full_fetch_max_chars

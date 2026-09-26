@@ -178,7 +178,7 @@ All keys in `config.yaml` with defaults:
 | `fetch_max_chars` | `4000` | Cap on `range`/`grep` response size |
 | `full_fetch_max_chars` | `50000` | `full` mode refused above this when `refuse_full_fetch` |
 | `excerpt_max_chars` | `8000` | **Exact** cap on the excerpt block, incl. its truncation marker (min 200) |
-| `store_path` | `~/.hermes/toolaria` | Blob and session index directory |
+| `store_path` | `~/.hermes/toolaria` | Blob and session index directory. When `HERMES_HOME` is set, this legacy default resolves beneath that runtime home. |
 | `ttl_hours` | `72` | Auto-sweep blobs older than this |
 | `tombstone_ttl_hours` | `720` | Keep swept-blob guidance this long |
 | `max_store_mb` | `500` | Max total store size before oldest blobs are evicted |
