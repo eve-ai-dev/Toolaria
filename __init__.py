@@ -52,6 +52,7 @@ _cfg: dict = {}
 # Cleared back to False whenever the host signals that middleware
 # registration failed (e.g. attribute missing).
 _passref_alive: bool = False
+_retrieval_available: bool = False
 
 # Tools whose results may exceed context: the only built-ins rescued.
 # MCP tools are detected dynamically via the registry toolset prefix.
@@ -112,24 +113,36 @@ def _is_rescuable(tool_name: str) -> bool:
     return False
 
 
+# Spartan Gate: never select a multiplexed profile's store from process environment.
+def _profile_home() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+    except ModuleNotFoundError as exc:
+        if exc.name != "hermes_constants":
+            raise
+        return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser().resolve()
+    return Path(get_hermes_home()).resolve()
+
+
 def _safe_cfg(ctx) -> dict:
-    """Read plugin config from PluginContext or config.yaml fallback."""
-    try:
-        cfg = ctx.config.get("toolaria")
-        if cfg:
-            return dict(cfg)
-    except Exception:
-        pass
-    try:
-        import yaml
-        hp = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
-        cf = hp / "config.yaml"
-        if cf.exists():
-            raw = yaml.safe_load(cf.read_text())
-            return dict(raw.get("toolaria", {}))
-    except Exception:
-        pass
-    return {}
+    import yaml
+
+    path = _profile_home() / "config.yaml"
+    raw = yaml.safe_load(path.read_text()) if path.exists() else {}
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("toolaria", {}), dict):
+        raise ValueError("invalid profile Toolaria configuration")
+    cfg = dict(raw.get("toolaria", {}))
+    # Native PluginContext exposes plugin-relative settings through get_config.
+    get_config = getattr(ctx, "get_config", None)
+    if callable(get_config):
+        absent = object()
+        for key in set(_load_defaults()) | set(cfg) | {"store_path"}:
+            value = get_config(key, absent)
+            if value is not absent:
+                cfg[key] = value
+    return cfg
 
 
 _CWD = Path(__file__).resolve().parent
@@ -162,14 +175,22 @@ def _merge_cfg(user_cfg: dict) -> dict:
     defaults = _load_defaults()
     defaults.update(user_cfg)
     store_path = defaults.get("store_path", "~/.hermes/toolaria")
-    hermes_home = os.environ.get("HERMES_HOME")
-    if hermes_home and isinstance(store_path, str):
-        if store_path == "~/.hermes":
-            defaults["store_path"] = hermes_home
-        elif store_path.startswith("~/.hermes/"):
-            defaults["store_path"] = str(
-                Path(hermes_home) / store_path.removeprefix("~/.hermes/")
-            )
+    # Spartan Gate: bind the configured store to the registration profile.
+    hermes_home = _profile_home()
+    if not isinstance(store_path, str) or not store_path.strip():
+        raise ValueError("invalid Toolaria store path")
+    if store_path == "~/.hermes":
+        candidate = hermes_home
+    elif store_path.startswith("~/.hermes/"):
+        candidate = hermes_home / store_path.removeprefix("~/.hermes/")
+    else:
+        candidate = Path(store_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = hermes_home / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_relative_to(hermes_home):
+        raise ValueError("Toolaria store must remain inside its profile home")
+    defaults["store_path"] = str(candidate)
     for _k, _v in _PHASE1_DEFAULTS.items():
         defaults.setdefault(_k, _v)
     for _k, _v in _PHASE2_DEFAULTS.items():
@@ -226,7 +247,8 @@ _PHASE2_DEFAULTS: dict = {
 
 
 def register(ctx) -> None:
-    global _store, _cfg
+    global _store, _cfg, _retrieval_available
+    _retrieval_available = False
     _cfg = _merge_cfg(_safe_cfg(ctx))
     # Copy rather than mutate the caller's list in place.
     excludes = list(_cfg.get("exclude_tools", []))
@@ -304,7 +326,7 @@ def register(ctx) -> None:
                     "mode": {
                         "type": "string",
                         "enum": ["outline", "search", "range", "grep",
-                                 "chain", "stat", "full", "audit"],
+                                 "chain", "stat", "full"],
                         "description": ("Retrieval mode (default: stat). "
                                         "'audit' returns the read-only "
                                         "expansion ledger summary."),
@@ -343,7 +365,7 @@ def register(ctx) -> None:
     # session can only read blobs it rescued). On a host without ambient
     # support, fail LOUD rather than silently emit dead handles in
     # toolset-restricted sessions.
-    _mark_rescuer_ambient()
+    _retrieval_available = _mark_rescuer_ambient()
 
     ctx.register_command(
         name="rescuer",
@@ -497,39 +519,19 @@ def _rotate_key_cmd(raw_args: str = "") -> str:
     )
 
 
-def _mark_rescuer_ambient() -> None:
-    """Register the rescuer toolset as ambient with the host tool registry.
-
-    Idempotent and host-agnostic: a host that predates ambient-toolset support
-    simply lacks ``registry.mark_ambient``, in which case we emit a prominent
-    warning so the operator enables the ``rescuer`` toolset for cron/profile
-    sessions instead of discovering dead handles in the logs days later."""
+def _mark_rescuer_ambient() -> bool:
+    """Only rescue when the host guarantees retrieval in restricted sessions."""
     try:
         from tools.registry import registry
-    except Exception as exc:
-        logger.warning(
-            "toolaria: tool registry unavailable, cannot guarantee rescuer_fetch "
-            "availability (%s); rescue handles may be unredeemable in restricted "
-            "sessions", exc,
-        )
-        return
-    mark = getattr(registry, "mark_ambient", None)
-    if not callable(mark):
-        logger.warning(
-            "toolaria: host lacks ambient-toolset support; rescuer_fetch will be "
-            "UNAVAILABLE in toolset-restricted sessions (cron/profile) and rescue "
-            "handles there cannot be fetched. Add 'rescuer' to those sessions' "
-            "enabled_toolsets, or upgrade the host.",
-        )
-        return
-    try:
+        mark = getattr(registry, "mark_ambient", None)
+        if not callable(mark):
+            logger.info("toolaria: ambient retrieval unavailable; oversized results pass through unchanged")
+            return False
         mark(_RESCUER_TOOLSET)
-        logger.info(
-            "toolaria: rescuer toolset marked ambient; rescuer_fetch is reachable "
-            "in every session regardless of toolset scope",
-        )
-    except Exception as exc:
-        logger.warning("toolaria: mark_ambient('rescuer') failed: %s", exc)
+    except Exception:
+        logger.warning("toolaria: ambient retrieval registration failed; oversized results pass through unchanged")
+        return False
+    return True
 
 
 # ── hooks ────────────────────────────────────────────────────────────────
@@ -543,6 +545,8 @@ def _on_transform(
     **kwargs,
 ):
     """Replace oversized tool results with excerpt + rescue handle."""
+    if not _retrieval_available or not isinstance(session_id, str) or not session_id.strip():
+        return None
     if not _is_rescuable(tool_name):
         return None
     if tool_name in _cfg.get("exclude_tools", []):
@@ -748,6 +752,8 @@ def _fetch(args: dict | None = None, **kwargs) -> str:
     pattern = args.get("pattern", "")
     query = args.get("query", "")
     session_id = kwargs.get("session_id", "")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return "Error: rescuer requires an owning session"
 
     # T2.2: audit mode is a status query, not a blob retrieval. It
     # reads the expansion ledger directly (no blob bytes touched, no
@@ -755,7 +761,7 @@ def _fetch(args: dict | None = None, **kwargs) -> str:
     # operator can call audit with any well-formed handle from a recent
     # rescue without re-running the rescue.
     if mode == "audit":
-        return _store._audit_summary(count)
+        return "Error: audit is available only through the operator command"
 
     bid_raw = args.get("id", "")
     # T4.1: accept the ``<bid>[@<int>]`` grammar. The store's fetch

@@ -310,6 +310,9 @@ def _expand_string(text: str, store, cfg: dict, stats: dict,
     """
     if "tla:" not in text:
         return text, False
+    # Spartan Gate: an unidentified caller must never expand a stored handle.
+    if not isinstance(session_id, str) or not session_id.strip():
+        return TOKEN_RE.sub("[Toolaria: owning session required]", text), True
     denied = _external_destination_denied(tool_name, cfg) if tool_name else False
     if denied:
         # len() of finditer: TOKEN_RE now has optional @N groups (T4.1),
